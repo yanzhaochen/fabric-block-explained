@@ -178,7 +178,7 @@ func (b *blocksRequester) RequestBlocks(ledgerInfoProvider blocksprovider.Ledger
 			return err
 		}
 	} else {
-		logger.Debugf("Starting deliver with oldest block for channel %s", b.chainID)
+		logger.Debugf("Starting deliver with oldest block for channel %s", b.chainID) 
 		if err := b.seekOldest(); err != nil {
 			return err
 		}
