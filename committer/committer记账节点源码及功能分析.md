@@ -33,6 +33,7 @@ Committer 的功能模块包括交易验证模块和账本提交模块，
 ```go
 // Committer 相关接口
 // core/committer/txvalidator/validator.go
+// 本文所有源码均为 release-v1.4 版本
 
 type Validator interface {
 	Validate(block *common.Block) error
@@ -125,7 +126,8 @@ func (v *txValidator) Validate(block *common.Block) error {
                 // 验证交易后释放信号量
 				defer v.support.Release(1)
 				// 传入 blockValidationRequest 类型的验证请求对象，
-                // 调用 validateTx 函数验证交易
+                // 调用 validateTx 函数验证交易,
+                // (后文将分析该函数的源码)
 				validateTx(&blockValidationRequest{
 					d:     dLcl,
 					block: block,
@@ -187,6 +189,9 @@ func (v *txValidator) Validate(block *common.Block) error {
 ### validateTx 函数的源码分析
 
 ```go
+// validateTx 函数的源码分析
+// core/committer/txvalidator/validator.go
+
 func validateTx(req *blockValidationRequest, results chan<- *blockValidationResult) {
 	block := req.block // 区块
 	d := req.d         // 交易数据
@@ -194,7 +199,7 @@ func validateTx(req *blockValidationRequest, results chan<- *blockValidationResu
 	v := req.v         // 交易验证器 txValidator 结构
 	txID := ""         // 交易 ID
 
-	if d == nil { // 若交易数据为空，则无需验证，直接返回交易序号
+	if d == nil { // 若交易数据为空，则无需验证
 		...
 		return
 	}
@@ -205,12 +210,16 @@ func validateTx(req *blockValidationRequest, results chan<- *blockValidationResu
 		return
 	} else if env != nil {
 		...
-		// 验证交易格式正确性、签名合法性、交易内容是否被篡改，（验证背书策略的工作由后面的 vscc 完成）
-		// 获取交易消息的载荷 payload
+        
+        // 调用 validation.ValidateTransaction() 函数,
+        // (该函数源码见后文)
+		// 验证交易格式正确性、签名合法性、交易内容是否被篡改,（验证背书策略的工作由后面的 vscc 完成）,
+		// 并获取交易消息的载荷 payload
 		if payload, txResult = validation.ValidateTransaction(env, v.support.Capabilities()); txResult != peer.TxValidationCode_VALID {
 			... // 出错处理
 			return
 		}
+        
 		// 解析通道头部，创建 ChannelHeader 类型对象 chdr，
 		// 包含属性：Type、Version、Timestamp、ChannelId、TxId、Epoch、Extension 和 TlsCertHash
 		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
@@ -290,6 +299,86 @@ func validateTx(req *blockValidationRequest, results chan<- *blockValidationResu
 	} else {
 		... // 交易数据为 nil, 返回交易消息错误
 		return
+	}
+
+}
+```
+### ValidateTransaction 函数工作流程
+
+1.  检查交易参数合法性
+2.  调用 utils.GetPayload() 解析交易消息负载 payload
+3.  调用 validateCommonHeader() 验证通道头部 chdr 和签名头部 shdr 合法性
+4.  根据消息通道头部类型, 验证交易内容
+
+### ValidateTransaction 函数源码分析
+
+
+```go
+// ValidateTransaction 函数源码分析
+// core/common/validation/msgvalidation.go
+
+func ValidateTransaction(e *common.Envelope, c channelconfig.ApplicationCapabilities) (*common.Payload, pb.TxValidationCode) {
+	...
+
+	// 检查参数合法性
+	if e == nil {
+		... // 出错处理
+	}
+	
+	// 解析交易消息负载
+	payload, err := utils.GetPayload(e)
+	... // 出错处理
+	
+	putilsLogger.Debugf("Header is %s", payload.Header)
+	
+	// 验证消息头部格式
+	chdr, shdr, err := validateCommonHeader(payload.Header)
+	... // 出错处理
+	
+	// 验证消息签名的合法性
+	err = checkSignatureFromCreator(shdr.Creator, e.Signature, e.Payload, chdr.ChannelId)
+	... // 出错处理
+	
+	// 根据消息通道头部类型进行处理，四种类型：
+	// a.普通交易消息、b. Peer 资源更新消息、
+	// c.通道配置交易消息、d.其他
+	switch common.HeaderType(chdr.Type) {
+	
+	// a. 普通交易消息
+	case common.HeaderType_ENDORSER_TRANSACTION:
+		// 验证交易ID，防止重复提交账本
+		err = utils.CheckProposalTxID(
+			chdr.TxId,
+			shdr.Nonce,
+			shdr.Creator)
+		... // 出错处理
+        
+		// 验证 ENDORSER 类型交易的交易负载
+		err = validateEndorserTransaction(payload.Data, payload.Header)
+		... // 出错处理
+        
+		return payload, pb.TxValidationCode_VALID
+	
+	// b. Peer资源更新消息
+	case common.HeaderType_PEER_RESOURCE_UPDATE:
+		if !c.ResourcesTree() {
+			return nil, pb.TxValidationCode_UNSUPPORTED_TX_PAYLOAD
+		}
+
+		// 剩余验证类似于common.HeaderType_CONFIG类型消息
+		fallthrough
+	
+	// c. CONFIG通道配置交易消息
+	case common.HeaderType_CONFIG:
+		// 验证CONFIG类型交易的交易负载
+		err = validateConfigTransaction(payload.Data, payload.Header)
+		... // 出错处理
+        
+		return payload, pb.TxValidationCode_VALID
+	
+	// d. 其他（不支持的交易消息类型）
+	default:
+		... // 出错处理
 	}
 
 }
