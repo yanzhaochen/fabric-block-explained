@@ -185,3 +185,113 @@ func (v *txValidator) Validate(block *common.Block) error {
 ```
 
 ### validateTx 函数的源码分析
+
+```go
+func validateTx(req *blockValidationRequest, results chan<- *blockValidationResult) {
+	block := req.block // 区块
+	d := req.d         // 交易数据
+	tIdx := req.tIdx   // 交易序号
+	v := req.v         // 交易验证器 txValidator 结构
+	txID := ""         // 交易 ID
+
+	if d == nil { // 若交易数据为空，则无需验证，直接返回交易序号
+		...
+		return
+	}
+	
+	// 从区块中解析获取交易数据的 Envelope 结构对象 env
+	if env, err := utils.GetEnvelopeFromBlock(d); err != nil {
+		... // 出错处理
+		return
+	} else if env != nil {
+		...
+		// 验证交易格式正确性、签名合法性、交易内容是否被篡改，（验证背书策略的工作由后面的 vscc 完成）
+		// 获取交易消息的载荷 payload
+		if payload, txResult = validation.ValidateTransaction(env, v.support.Capabilities()); txResult != peer.TxValidationCode_VALID {
+			... // 出错处理
+			return
+		}
+		// 解析通道头部，创建 ChannelHeader 类型对象 chdr，
+		// 包含属性：Type、Version、Timestamp、ChannelId、TxId、Epoch、Extension 和 TlsCertHash
+		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		... // 出错处理
+	
+		// 获取通道 ID
+		channel := chdr.ChannelId
+		...
+	
+		// 检查通道链结构是否存在（v2.0 仍未实现 chainExists 函数）
+		if !v.chainExists(channel) {
+			... // 出错处理
+			return
+		}
+	
+		// 根据消息通道头部类型进行处理，三种类型：
+		// 1.普通交易消息、2.通道配置交易消息、3.其他
+        
+        // 1. 经过 Endorser 背书的普通交易消息
+		if common.HeaderType(chdr.Type) == common.HeaderType_ENDORSER_TRANSACTION { 
+			// 获取交易 ID
+			txID = chdr.TxId
+			// 调用 v.support.Ledger().GetTransactionByID(txID) 函数检查交易的唯一性
+			if _, err := v.support.Ledger().GetTransactionByID(txID); err == nil {
+				... // 出错处理
+				return
+			}
+	
+			// 执行验证系统链码 vscc（调用 v.vscc.VSCCValidateTx）方法验证交易背书策略
+			err, cde := v.vscc.VSCCValidateTx(payload, d, env)
+			... // 出错处理
+	
+			// 调用 v.getTxCCInstance 方法，
+			// 从消息载荷中获取链码示例对象，
+			// 包括调用链码 txsChaincodeName 和升级链码 txsUpgradedChaincode
+			invokeCC, upgradeCC, err := v.getTxCCInstance(payload)
+			... // 出错处理
+			txsChaincodeName = invokeCC
+			if upgradeCC != nil {
+				...
+				txsUpgradedChaincode = upgradeCC
+			}
+		} 
+        // 2. 通道配置交易信息
+        else if common.HeaderType(chdr.Type) == common.HeaderType_CONFIG {
+			configEnvelope, err := configtx.UnmarshalConfigEnvelope(payload.Data)
+			... // 出错处理
+	
+			// 调用 v.support.Apply 方法（在 core/peer/peer.go 中实现）,
+			// 更新通道配置
+			if err := v.support.Apply(configEnvelope); err != nil {
+				... // 出错处理
+				return
+			}
+			...
+		} 
+        // 3. 其他情况按出错处理
+		else {
+			... 
+		}
+	
+        // 序列化封装交易消息 Envelope 结构对象
+		if _, err := proto.Marshal(env); err != nil {
+			... // 出错处理
+			return
+		}
+		// 顺利运行至此说明交易合法, 
+		// 构造交易验证结果消息传入管道 results
+		results <- &blockValidationResult{
+			tIdx:                 tIdx,
+			txsChaincodeName:     txsChaincodeName,
+			txsUpgradedChaincode: txsUpgradedChaincode,
+			validationCode:       peer.TxValidationCode_VALID,
+			txid:                 txID,
+		}
+		return
+	} else {
+		... // 交易数据为 nil, 返回交易消息错误
+		return
+	}
+
+}
+```
+
