@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>committer 验证交易及提交账本的工作流程分析</title>
+        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+        
+        <style>
+.task-list-item { list-style-type: none; } .task-list-item-checkbox { margin-left: -20px; vertical-align: middle; }
+</style>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        
+        
+    </head>
+    <body class="vscode-light">
+        <h1 id="committer-%e9%aa%8c%e8%af%81%e4%ba%a4%e6%98%93%e5%8f%8a%e6%8f%90%e4%ba%a4%e8%b4%a6%e6%9c%ac%e7%9a%84%e5%b7%a5%e4%bd%9c%e6%b5%81%e7%a8%8b%e5%88%86%e6%9e%90">committer 验证交易及提交账本的工作流程分析</h1>
+<h2 id="%e4%b8%80%e6%a8%a1%e5%9d%97%e8%af%b4%e6%98%8e">一、模块说明</h2>
+<h3 id="11-coordinator-%e6%a8%a1%e5%9d%97">1.1 coordinator 模块</h3>
+<p><code>coordinator</code> 模块封装了交易验证器和账本提交器，分别用于验证交易和提交账本。</p>
+<h3 id="12-state-%e6%a8%a1%e5%9d%97">1.2 state 模块</h3>
+<p><code>Peer</code> 节点调用 <code>cscc</code>（配置系统链码）加入一个应用通道时，创建 <code>state</code> 模块（ <code>gossip</code> 服务实例）用于接收并处理数据消息。</p>
+<p><code>state</code> 模块循环监听 <code>gossipChan</code> 通道和 <code>readyChan</code> 通道，调用 <code>queueNewMessage()</code>，<code>deliverPayload()</code> 和 <code>commitBlock()</code> 等方法处理、验证并提交账本。</p>
+<p><code>state</code> 模块通过 <code>gossipChan</code> 通道接收 <code>DataMsg</code> 类型消息，其中包含了区块和隐私数据；通过 <code>readyChan</code> 通道在模块内部通知已经获取到正在等待的 <code>DataMsg</code> 类型消息，需要进行验证和提交。</p>
+<p><strong>核心方法</strong>：<code>state</code> 模块通过 <code>commitBlock()</code> 方法调用 <code>s.ledger.StoreBlock()</code> 方法（state 模块中封装了 <code>coordinator</code> 模块作为 <code>ledger</code> 字段），进而调用 <code>coordinator.StoreBlock()</code> 方法（验证交易和提交账本的核心方法，也是本文分析重点）。</p>
+<h3 id="13-transient-%e9%9a%90%e7%a7%81%e6%95%b0%e6%8d%ae%e5%ba%93">1.3 transient 隐私数据库</h3>
+<p>当通道上的某个组织或组织子集需要对通道上的其他组织保持数据私密的情况下，可以使用点对点传播的隐私数据集合（包含实际的隐私数据和用于验证的隐私数据哈希值）。隐私数据集合的数据结构见后文 2.2.2 小节分析。</p>
+<p><code>transient</code> 隐私数据库相当于账本中隐私数据的本地“缓存”，<code>Committer</code> 节点提交账本之后要对 <code>transient</code> 隐私数据库进行更新。隐私数据的交易过程为</p>
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据库1.jpg" alt="隐私数据库1" style="zoom: 67%;" />
+<ol>
+<li>客户端执行链码，发送包含隐私数据的提案请求给 <code>Endorsor</code> 节点；</li>
+<li><code>Endorsor</code> 节点进行模拟交易，将隐私数据存放到本节点的 <code>transient</code> 隐私数据库中；</li>
+<li><code>Endorsor</code> 节点将经过背书的隐私数据哈希值通过提案响应返回给客户端，并通过 <code>gossip</code> 协议发送隐私数据给其他授权节点；</li>
+<li>客户端将包含经过背书的隐私数据哈希值的交易发送给 <code>Orderer</code> 节点请求排序出块。不包含在组织内部的 <code>Orderer</code> 无权访问（事实上也获取不到）隐私数据，但因为有经过背书的隐私数据哈希值，能够检验交易的正确性。</li>
+</ol>
+<h2 id="%e4%ba%8ccommitter-%e5%b7%a5%e4%bd%9c%e6%b5%81%e7%a8%8b">二、committer 工作流程</h2>
+<p>本章第一节介绍了committer 工作的整体流程；本章后文介绍了核心方法 <code>coordinator.StoreBlock()</code> 。</p>
+<h3 id="21-committer-%e5%b7%a5%e4%bd%9c%e6%b5%81%e7%a8%8b%e7%ae%80%e8%bf%b0">2.1 committer 工作流程简述</h3>
+<p><code>committer</code> 通过 <code>state</code> 模块接收 <code>DataMsg</code> 类型消息，验证交易并提交到账本的工作流程如图所示</p>
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/state模块提交账本流程1.jpg" style="zoom: 50%;" />
+<p><em>committer 验证交易并提交到账本的工作流程图</em></p>
+<p><em>符号说明：蓝色字体表示调用的方法（未标明参数），绿色字体表示数据，实心箭头表示数据流向。</em></p>
+<ol>
+<li>其他节点发来 <code>DataMsg</code> 类型的数据消息，放入 <code>gossipChan</code> 通道中；</li>
+<li><code>state</code> 模块建立消息监听循环，若扑捉到 <code>gossipChan</code> 通道中的消息，则调用 <code>queueNewMessage()</code> 方法进行处理；</li>
+<li><code>queueNewMessage()</code> 方法先调用 <code>addPayload()</code> 方法将负载消息放入本地的缓冲区，并检查区块号是否为 <code>NEXT</code>（等待提交的下一个区块），是则将消息发送到 <code>readyChan</code> 通道中（通知 <code>deliverPayload()</code> 方法已经获取到正在等待的消息了）；</li>
+<li><code>state</code> 模块的 <code>deliverPayload()</code> 方法捕捉 <code>readyChan</code> 通道的消息，从中获取有效消息（<code>payload</code>），并解析得到区块数据 <code>rowBlock</code>（<code>common.block</code> 类型）和隐私数据 <code>p</code> 或称为 <code>privateDataSets</code>（<code>util.PvtDataCollections</code> 类型）；</li>
+<li><code>state</code> 模块调用 <code>commitBlock(rowBlock, p)</code> 方法（值得注意的是，区块数据 <code>rowBlock</code> 和隐私数据 <code>p</code> 都作为参数传入），利用 <code>coordinator</code> 模块验证交易数据并提交到账本。</li>
+</ol>
+<h3 id="22-coordinatorstoreblock-%e6%96%b9%e6%b3%95">2.2 coordinator.StoreBlock() 方法</h3>
+<p>2.2.1 小节介绍了 <code>coordinator.StoreBlock()</code> 方法的源码，主要聚焦于该方法的工作步骤；随后的几个小节介绍了 <code>coordinator.StoreBlock()</code> 方法调用的其他方法；</p>
+<p>2.2.2 小节介绍了用于获取本地已有的隐私数据的 <code>computeOwnedRWsets()</code> 方法；</p>
+<p>2.2.2 小节介绍了用于计算本地缺失的隐私数据的 <code>listMissingPrivateData()</code> 方法。</p>
+<p>（待补充</p>
+<h4 id="221-coordinatorstoreblock-%e6%96%b9%e6%b3%95">2.2.1 coordinator.StoreBlock() 方法</h4>
+<h5 id="coordinatorstoreblock-%e6%96%b9%e6%b3%95%e7%9a%84%e5%b7%a5%e4%bd%9c%e6%b5%81%e7%a8%8b"><code>coordinator.StoreBlock()</code> 方法的工作流程</h5>
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/StoreBlock1.jpg" style="zoom:50%;" />
+<p><em>符号说明：蓝色字体表示处理过程，绿色字体表示数据，实心箭头表示数据流向。</em></p>
+<ol>
+<li>
+<p>检查区块数据与消息头部的合法性（<code>block.Data</code> 和 <code>block.Header </code>非空则合法）；</p>
+</li>
+<li>
+<p>调用 <code>Validate()</code> 方法，验证区块中交易数据的合法性并调用 <code>vscc</code> 系统链码验证背书策略的合法性；<code>Validate()</code> 是一个核心方法，其分析见其他文档；</p>
+</li>
+<li>
+<p>处理隐私数据，包括获取已经随 <code>DataMsg</code> 消息发送到本节点的隐私数据集合，计算本地缺失的隐私数据和从远程节点拉取缺失的隐私数据集合；构造要提交到账本的区块与隐私数据对象（<code>BlockAndPvtData</code> 结构）：</p>
+<ul>
+<li><strong>从隐私数据集合 <code>p</code> 中获取已经达到本节点的隐私数据读写集</strong>：调用 <code>computeOwnedRWsets()</code> 方法处理与当前区块数据相关的交易隐私数据，构造在该节点上已经存在的隐私数据读写集 <code>ownedRWsets</code>；</li>
+<li><strong>计算本地缺失的隐私数据读写集</strong>：调用 <code>coordinator.listMissingPrivateData(block, ownedRWsets)</code>, 计算出需要提交的但是没有随 <code>DataMsg</code> 消息到达本地的隐私数据读写集（参数 <code>ownedRWsets</code> 为已获取到的本地隐私数据读写集），并从本地的 <code>transient</code> 隐私数据库补充 <code>ownedRWsets</code>；</li>
+<li><strong>从远程节点拉取缺失的隐私数据集合</strong>：调用 <code>fetchFromPeers()</code> 方法，利用 <code>Fetcher</code> 组件从其他 <code>Peer</code> 节点请求拉取本节点缺失的隐私数据，并存放于到本地 <code>transient</code> 隐私数据库，更新缺失的隐私数据键列表 <code>missingKeys</code>。至此 <code>coordinator.StoreBlock()</code> 获取到所有隐私数据。</li>
+</ul>
+</li>
+<li>
+<p>调用 <code>coordinator.CommitWithPvtData()</code>方法，将区块与隐私数据对象提交到账本；</p>
+</li>
+<li>
+<p>清理本地的 <code>transient</code> 隐私数据库中已提交的隐私数据和指定高度以下的隐私数据。</p>
+</li>
+</ol>
+<h5 id="coordinatorstoreblock-%e6%96%b9%e6%b3%95%e7%9a%84%e6%ba%90%e7%a0%81%e5%88%86%e6%9e%90"><code>coordinator.StoreBlock()</code> 方法的源码分析</h5>
+<pre><code class="language-go"><div><span class="hljs-comment">// coordinator.StoreBlock() 方法源码分析</span>
+<span class="hljs-comment">// 源码位于文件：gossip/privdata/coordinator.go</span>
+<span class="hljs-comment">// 为了方便阅读，出错处理和日志操作等操作均用省略号代替，部分代码顺序有所调整</span>
+<span class="hljs-comment">// 本文所有源码均为 release-v1.4 版本</span>
+
+<span class="hljs-comment">// coordinator.StoreBlock() 方法用于验证数据并提交账本</span>
+<span class="hljs-comment">// 值得注意的是参数（区块数据 block 和隐私数据集合 privateDataSets）</span>
+<span class="hljs-comment">// 均解析自 DataMsg 的有效消息载荷 payload</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(c *coordinator)</span> <span class="hljs-title">StoreBlock</span><span class="hljs-params">(block *common.Block, privateDataSets util.PvtDataCollections)</span> <span class="hljs-title">error</span></span> {
+	<span class="hljs-comment">// 检查区块数据与消息头部的合法性</span>
+	<span class="hljs-keyword">if</span> block.Data == <span class="hljs-literal">nil</span> {...}
+    <span class="hljs-keyword">if</span> block.Header == <span class="hljs-literal">nil</span> {...}
+	...
+
+    <span class="hljs-comment">// 调用 Validate() 方法，验证区块中交易数据的合法性并调用 vscc 系统链码验证背书策略的合法性</span>
+	err := c.Validator.Validate(block)
+	...
+	
+	<span class="hljs-comment">// 处理隐私数据</span>
+	<span class="hljs-comment">// 1. 获取当前节点现存的隐私数据读写集</span>
+	ownedRWsets, err := computeOwnedRWsets(block, privateDataSets)
+	...
+	
+	<span class="hljs-comment">// 2. 计算当前节点缺失的隐私数据</span>
+	privateInfo, err := c.listMissingPrivateData(block, ownedRWsets)
+	...
+	
+	<span class="hljs-comment">// 3. 从其他 peer 拉取本地缺失的隐私数据</span>
+	<span class="hljs-keyword">for</span> <span class="hljs-built_in">len</span>(privateInfo.missingKeys) &gt; <span class="hljs-number">0</span> &amp;&amp; time.Now().Before(limit) {
+		c.fetchFromPeers(block.Header.Number, ownedRWsets, privateInfo)
+		time.Sleep(pullRetrySleepInterval)
+	}
+	...
+    
+    <span class="hljs-comment">// 构造区块与隐私数据对象（BlockAndPvtData 结构）</span>
+	blockAndPvtData := &amp;ledger.BlockAndPvtData{
+		Block:        block,
+		BlockPvtData: <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[<span class="hljs-keyword">uint64</span>]*ledger.TxPvtData),
+	}
+    
+	<span class="hljs-comment">// 1. 构造 blockAndPvtData 结构中的本地已有（已经提交到账本）的隐私数据</span>
+	<span class="hljs-keyword">for</span> seqInBlock, nsRWS := <span class="hljs-keyword">range</span> ownedRWsets.bySeqsInBlock() {
+		rwsets := nsRWS.toRWSet()
+		...
+		blockAndPvtData.BlockPvtData[seqInBlock] = &amp;ledger.TxPvtData{
+			SeqInBlock: seqInBlock,
+			WriteSet:   rwsets,
+		}
+	}
+	
+	<span class="hljs-comment">// 2. 构造 blockAndPvtData 结构中需要提交到账本但本地缺失的隐私数据读写集</span>
+	<span class="hljs-keyword">for</span> missingRWS := <span class="hljs-keyword">range</span> privateInfo.missingKeys {
+		blockAndPvtData.Missing = <span class="hljs-built_in">append</span>(blockAndPvtData.Missing, ledger.MissingPrivateData{
+			TxId:       missingRWS.txID,
+			Namespace:  missingRWS.namespace,
+			Collection: missingRWS.collection,
+			SeqInBlock: <span class="hljs-keyword">int</span>(missingRWS.seqInBlock),
+		})
+	}
+	
+	<span class="hljs-comment">// 提交区块和隐私数据</span>
+	err = c.CommitWithPvtData(blockAndPvtData)
+	...
+	
+	<span class="hljs-comment">// 清理 transient 隐私数据存储对象中的临时隐私数据</span>
+	<span class="hljs-comment">// 1. 删除指定交易关联的隐私数据读写集（已提交的隐私数据不再存于 transient）</span>
+	<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(blockAndPvtData.BlockPvtData) &gt; <span class="hljs-number">0</span> {
+		<span class="hljs-keyword">if</span> err := c.PurgeByTxids(privateInfo.txns); err != <span class="hljs-literal">nil</span> {...}
+	}
+    
+	<span class="hljs-comment">// 2. 删除指定高度一下的隐私数据读写集（保证数据的时效性）</span>
+	seq := block.Header.Number
+	<span class="hljs-keyword">if</span> seq%c.transientBlockRetention == <span class="hljs-number">0</span> &amp;&amp; seq &gt; c.transientBlockRetention {
+		err := c.PurgeByHeight(seq - c.transientBlockRetention)
+		...
+	}
+	
+	<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>
+
+}
+</div></code></pre>
+<h4 id="222-computeownedrwsets-%e6%96%b9%e6%b3%95">2.2.2 computeOwnedRWsets() 方法</h4>
+<p>验证与提交账本的核心方法 <code>coordinator.StoreBlock()</code> 调用 <code>computeOwnedRWsets(block, p)</code> 方法遍历隐私数据集合（<code>PvtDataCollections</code> 类型），迭代处理与当前区块相关的交易数据，构造已到达当前节点且在区块 <code>block</code> 交易序号内的隐私数据读写集对象 <code>ownedRWsets</code>；该对象为 <code>map[rwSetHey][]byte</code> 类型，其中值类型为适合做字符处理的 <code>[]byte</code> ，用来存放着隐私数据；键类型  <code>reSetKey</code> 为包含隐私数据相关信息的结构体，其定义见下方源码。</p>
+<h5 id="computeownedrwsets-%e6%96%b9%e6%b3%95%e6%ba%90%e7%a0%81%e5%88%86%e6%9e%90">computeOwnedRWsets() 方法源码分析</h5>
+<pre><code class="language-go"><div><span class="hljs-comment">// computeOwnedRWsets() 方法相关源码</span>
+<span class="hljs-comment">// 源码位于文件：gossip/privdata/coordinator.go</span>
+
+<span class="hljs-comment">// 隐私数据读写集对象 ownedRWsets 的键类型 reSetKey 定义</span>
+<span class="hljs-keyword">type</span> rwSetKey <span class="hljs-keyword">struct</span> {
+    txID       <span class="hljs-keyword">string</span>   <span class="hljs-comment">// 交易 ID</span>
+    seqInBlock <span class="hljs-keyword">uint64</span>   <span class="hljs-comment">// 交易序号</span>
+    namespace  <span class="hljs-keyword">string</span>   <span class="hljs-comment">// 命名空间（链码名称）</span>
+    collection <span class="hljs-keyword">string</span>   <span class="hljs-comment">// 隐私数据集合名称</span>
+    hash       <span class="hljs-keyword">string</span>   <span class="hljs-comment">// 读写集哈希值，可供无法查看隐私数据的节点检验隐私数据的合法性</span>
+}
+
+<span class="hljs-comment">// computeOwnedRWsets() 方法获取已到达当前节点且在区块交易序号内的隐私数据读写集</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-title">computeOwnedRWsets</span><span class="hljs-params">(block *common.Block, blockPvtData util.PvtDataCollections)</span> <span class="hljs-params">(rwsetByKeys, error)</span></span> {
+	<span class="hljs-comment">// 获取区块内最后一个交易序号（index）</span>
+	lastBlockSeq := <span class="hljs-built_in">len</span>(block.Data.Data) - <span class="hljs-number">1</span>
+
+    <span class="hljs-comment">// 构造在该节点上已经存在的隐私数据读写集对象 ownedRWsets</span>
+	ownedRWsets := <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[rwSetKey][]<span class="hljs-keyword">byte</span>)
+    
+    <span class="hljs-comment">// 循环处理每一个隐私数据，筛选出在区块范围内的隐私数据，并计算哈希值</span>
+	<span class="hljs-keyword">for</span> _, txPvtData := <span class="hljs-keyword">range</span> blockPvtData {
+        <span class="hljs-comment">// 只处理在区块交易序号内的隐私数据</span>
+		<span class="hljs-keyword">if</span> lastBlockSeq &lt; <span class="hljs-keyword">int</span>(txPvtData.SeqInBlock) { 
+			...
+			<span class="hljs-keyword">continue</span> <span class="hljs-comment">// 交易序号超过区块内的最后一个序号则跳过处理</span>
+		}
+		<span class="hljs-comment">// 从区块获取特定交易的 envelope</span>
+		env, err := utils.GetEnvelopeFromBlock(block.Data.Data[txPvtData.SeqInBlock])
+		...
+		<span class="hljs-comment">// 从 envelope 获取有效消息 payload</span>
+		payload, err := utils.GetPayload(env)
+		...
+	
+		<span class="hljs-comment">// 获取应用通道头部 chdr</span>
+		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		...
+		
+		<span class="hljs-keyword">for</span> _, ns := <span class="hljs-keyword">range</span> txPvtData.WriteSet.NsPvtRwset {
+			<span class="hljs-keyword">for</span> _, col := <span class="hljs-keyword">range</span> ns.CollectionPvtRwset {
+				<span class="hljs-comment">// 计算隐私数据读写集的哈希值</span>
+				computedHash := hex.EncodeToString(util2.ComputeSHA256(col.Rwset))
+				<span class="hljs-comment">// 将隐私数据和相关信息写入要返回的隐私数据读写集字典</span>
+				ownedRWsets[rwSetKey{
+					txID:       chdr.TxId,
+					seqInBlock: txPvtData.SeqInBlock,
+					collection: col.CollectionName,
+					namespace:  ns.Namespace,
+					hash:       computedHash,
+				}] = col.Rwset
+			} <span class="hljs-comment">// 命名空间内迭代隐私数据</span>
+		} <span class="hljs-comment">// 交易范围内迭代命名空间（链码名称）</span>
+	} <span class="hljs-comment">// 区块范围内迭代交易</span>
+	<span class="hljs-keyword">return</span> ownedRWsets, <span class="hljs-literal">nil</span>
+}
+</div></code></pre>
+<h5 id="%e9%9a%90%e7%a7%81%e6%95%b0%e6%8d%ae%e9%9b%86%e5%90%88%e6%95%b0%e6%8d%ae%e7%bb%93%e6%9e%84%e8%af%b4%e6%98%8e">隐私数据集合数据结构说明</h5>
+<p>隐私数据集合类型 <code>PvtDataCollection</code> 即从 <code>DataMsg</code> 解析得到的隐私数据 <code>p</code> 的类型，为了深入了解其结构，也为了更直观地展示上述代码三层迭代的关系，例图给出了隐私数据集合的数据结构关系（黑色字体表示数据类型，蓝色字体表示属性名，绿色方框表示数组/切片），可以看到三层数组分别对应三层迭代。</p>
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg" style="zoom: 33%;" />
+<pre><code class="language-go"><div><span class="hljs-comment">// 以下代码为隐私数据集合结构定义</span>
+
+<span class="hljs-comment">// gossip/util/privdata.go</span>
+<span class="hljs-keyword">type</span> PvtDataCollections []*ledger.TxPvtData
+
+<span class="hljs-comment">// core/ledger/ledger_interface.go</span>
+<span class="hljs-keyword">type</span> TxPvtData <span class="hljs-keyword">struct</span> {
+	SeqInBlock <span class="hljs-keyword">uint64</span>
+	WriteSet   *rwset.TxPvtReadWriteSet
+}
+
+<span class="hljs-comment">// protos/ledger/rwset/rwset.pb.go</span>
+<span class="hljs-keyword">type</span> TxPvtReadWriteSet <span class="hljs-keyword">struct</span> {
+	DataModel  TxReadWriteSet_DataModel <span class="hljs-string">`protobuf:"varint,1,opt,name=data_model,json=dataModel,enum=rwset.TxReadWriteSet_DataModel" json:"data_model,omitempty"`</span>
+	NsPvtRwset []*NsPvtReadWriteSet     <span class="hljs-string">`protobuf:"bytes,2,rep,name=ns_pvt_rwset,json=nsPvtRwset" json:"ns_pvt_rwset,omitempty"`</span>
+}
+
+<span class="hljs-keyword">type</span> NsPvtReadWriteSet <span class="hljs-keyword">struct</span> {
+	Namespace          <span class="hljs-keyword">string</span>                       <span class="hljs-string">`protobuf:"bytes,1,opt,name=namespace" json:"namespace,omitempty"`</span>
+	CollectionPvtRwset []*CollectionPvtReadWriteSet <span class="hljs-string">`protobuf:"bytes,2,rep,name=collection_pvt_rwset,json=collectionPvtRwset" json:"collection_pvt_rwset,omitempty"`</span>
+}
+
+<span class="hljs-keyword">type</span> CollectionPvtReadWriteSet <span class="hljs-keyword">struct</span> {
+
+  CollectionName <span class="hljs-keyword">string</span> <span class="hljs-string">`protobuf:"bytes,1,opt,name=collection_name,json=collectionName" json:"collection_name,omitempty"`</span>
+  Rwset     []<span class="hljs-keyword">byte</span> <span class="hljs-string">`protobuf:"bytes,2,opt,name=rwset,proto3" json:"rwset,omitempty"`</span>
+
+}
+</div></code></pre>
+<h4 id="223-listmissingprivatedata-%e6%96%b9%e6%b3%95">2.2.3 listMissingPrivateData() 方法</h4>
+<h5 id="%e8%8e%b7%e5%8f%96%e5%bd%93%e5%89%8d%e8%8a%82%e7%82%b9%e7%bc%ba%e5%a4%b1%e7%9a%84%e9%9a%90%e7%a7%81%e6%95%b0%e6%8d%ae%e9%94%ae%e5%88%97%e8%a1%a8%e7%9a%84%e6%b5%81%e7%a8%8b">获取当前节点缺失的隐私数据键列表的流程</h5>
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/获取缺失的隐私数据键列表1.jpg" style="zoom:50%;" />
+<p><em>矩形框表示数据，黑色箭头表示生成数据的过程，绿色箭头表示更新数据的过程，蓝色字体表示调用的方法，<code>transient</code> 为节点本地的隐私数据库，红色字体标注的 <code>ownedRWsets</code> 和 <code>missingKeys</code> 分别为流程图重点关注的已在本地的隐私数据（读写集）和本地缺失的隐私数据（键）</em></p>
+<p>步骤 1，2 已经在调用 <code>listMissingPrivateData</code> 方法前完成了；步骤 3 到 7 为 <code>listMissingPrivateData</code> 方法主要工作。</p>
+<ol>
+<li>当前节点通过 <code>state</code> 模块接收和处理 <code>DataMsg</code> 类型消息，并从中解析出区块数据 <code>block</code> 和隐私数据集合 <code>privateDataSets</code>；</li>
+<li>验证交易和提交账本的过程中，调用 <code>computeOwnedRWsets</code> 方法构造已随 <code>DataMsg</code> 发送到当前节点的隐私数据读写集 <code>ownedRWsets</code>；</li>
+<li><code>listMissingPrivateData</code> 方法从区块数据 <code>block</code> 中获取需要用到的信息，包括记录区块内各个交易有效性的交易过滤器 <code>txsFilter</code>（<code>txValidationFlags</code> 类型）和在当前区块范围内隐私数据读写集 <code>privateRWsetsInBlock</code>（实际上只记录了隐私数据键，用于步骤 6 检查已有的隐私数据是否在当前区块的交易范围内）；</li>
+<li>调用 <code>forEachTxn</code> 方法遍历当前区块中的有效交易，解析执行结果读写集和背书信息列表，提供给 <code>inspectTransaction</code> 方法调用，由后者计算出缺失的隐私数据键列表 <code>missingKeys</code> 及背书节点列表 <code>sources</code>；</li>
+<li>调用 <code>fetchMissingFromTransientStore</code> 方法，根据缺失隐私数据键的列表，获取当前缺失且存在于本地 <code>transient</code> 隐私数据库中隐私数据读写集， 并更新到已有的隐私数据读写集 <code>ownedRWsets</code> 中；</li>
+<li>遍历已有的隐私数据读写集 <code>ownedRWsets</code>，检查其键是否的 <code>privateRWsetsInBlock</code> 中出现，删除掉不在当前区块交易范围内隐私数据，使得 <code>ownedRWsets</code> 只保留当前区块交易范围内的隐私数据读写集；</li>
+<li>遍历缺失的隐私数据键列表 <code>missingKeys</code> ，检查隐私数据键是否在已有的隐私数据读写集 <code>ownedRWsets</code> 中出现，有则说明该键对应的隐私数据已经在本地，将该键从缺失列表中删除。</li>
+</ol>
+<p>至此  <code>listMissingPrivateData</code> 方法完成了根据本地 transsient 隐私数据库更新已有的隐私数据读写集 <code>ownedRWsets</code> 和获取缺失的隐私数据键列表 <code>missingKeys</code> 的任务。</p>
+<h5 id="listmissingprivatedata-%e6%96%b9%e6%b3%95%e6%ba%90%e7%a0%81"><code>listMissingPrivateData</code> 方法源码：</h5>
+<pre><code class="language-go"><div><span class="hljs-comment">// gossip/privdata/coordinator.go</span>
+<span class="hljs-comment">// listMissingPrivateData 方法根据区块数据 block 和已经计算出来的本地已有的隐私数据读写集 ownedRWsets，</span>
+<span class="hljs-comment">// 计算出本地缺失的隐私数据读写集，并尝试从本地 transien 隐私数据库中获取，</span>
+<span class="hljs-comment">// 最终获得当前节点缺失的隐私数据键列表 privateInfo.missingKeys</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(c *coordinator)</span> <span class="hljs-title">listMissingPrivateData</span><span class="hljs-params">(block *common.Block, ownedRWsets <span class="hljs-keyword">map</span>[rwSetKey][]<span class="hljs-keyword">byte</span>)</span> <span class="hljs-params">(*privateDataInfo, error)</span></span> {
+	<span class="hljs-comment">// 检查区块元数据的合法性</span>
+	<span class="hljs-keyword">if</span> block.Metadata == <span class="hljs-literal">nil</span> || <span class="hljs-built_in">len</span>(block.Metadata.Metadata) &lt;= <span class="hljs-keyword">int</span>(common.BlockMetadataIndex_TRANSACTIONS_FILTER) {
+		<span class="hljs-keyword">return</span> <span class="hljs-literal">nil</span>, errors.New(<span class="hljs-string">"Block.Metadata is nil or Block.Metadata lacks a Tx filter bitmap"</span>)
+	}
+	<span class="hljs-comment">// 获取区块元数据中标识交易结果的列表 txsFilter（包含成功的和失败的交易）</span>
+	txsFilter := txValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	<span class="hljs-comment">// 标识交易结果的列表长度应当等于区块中所有交易的数量</span>
+	<span class="hljs-keyword">if</span> <span class="hljs-built_in">len</span>(txsFilter) != <span class="hljs-built_in">len</span>(block.Data.Data) {
+		...
+	}
+
+	sources := <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[rwSetKey][]*peer.Endorsement)
+	privateRWsetsInBlock := <span class="hljs-built_in">make</span>(<span class="hljs-keyword">map</span>[rwSetKey]<span class="hljs-keyword">struct</span>{})
+	missing := <span class="hljs-built_in">make</span>(rwSetKeysByTxIDs)
+	data := blockData(block.Data.Data)
+    <span class="hljs-comment">// 构建 bi 对象用于查看当前节点上的隐私数据情况</span>
+    <span class="hljs-comment">// (注意到这里是引用，直接修改 sources 或 missing</span>
+    <span class="hljs-comment">// 等效于修改 bi.sources 或 bi.missingKeys)</span>
+	bi := &amp;transactionInspector{ 
+		sources:              sources,              <span class="hljs-comment">// 拥有隐私数据的背书节点列表</span>
+		missingKeys:          missing,              <span class="hljs-comment">// 缺失隐私数据键列表</span>
+		ownedRWsets:          ownedRWsets,          <span class="hljs-comment">// 当前节点已获取到的隐私数据读写集</span>
+		privateRWsetsInBlock: privateRWsetsInBlock, <span class="hljs-comment">// 在当前区块范围内隐私数据读写集</span>
+		coordinator:          c,                    <span class="hljs-comment">// 调用此方法的 coordinator 对象本身</span>
+	}
+	
+	<span class="hljs-comment">// == 获取当前区块中经过 Endorsor 背书的有效交易的交易 ID 列表 txList</span>
+	<span class="hljs-comment">// forEachTxn 方法遍历当前区块中的有效交易，解析执行结果读写集和背书信息列表，</span>
+	<span class="hljs-comment">// 提供给 bi.inspectTransaction 方法调用，</span>
+	<span class="hljs-comment">// 由后者计算出缺失的隐私数据键列表 bi.missingKeys 及背书节点列表 bi.sources</span>
+	txList, err := data.forEachTxn(txsFilter, bi.inspectTransaction)
+	...
+	
+	<span class="hljs-comment">// 构造隐私数据信息对象，是本方法要返回的结果</span>
+    <span class="hljs-comment">// (同样注意到这里是引用)</span>
+	privateInfo := &amp;privateDataInfo{
+		sources: sources,
+		<span class="hljs-comment">// missingKeys 属性未显式赋值，初始化为 nil</span>
+		missingKeysByTxIDs: missing,
+		txns:               txList,
+	}
+	...
+	
+	<span class="hljs-comment">// fetchMissingFromTransientStore 方法根据缺失隐私数据键的列表，</span>
+	<span class="hljs-comment">// 获取当前缺失且存在于本地 transient 隐私数据库中隐私数据读写集，</span>
+	<span class="hljs-comment">// 并补充到已获取到的隐私数据读写集 ownedRWsets 中</span>
+    <span class="hljs-comment">// (注意到实参 privateInfo.missingKeysByTxIDs 即 bi.inspectTransaction 计算出来的 missingKeys 对象)</span>
+	c.fetchMissingFromTransientStore(privateInfo.missingKeysByTxIDs, ownedRWsets)
+	
+	<span class="hljs-comment">// 遍历已获取到的隐私数据读写集 ownedRWsets，</span>
+	<span class="hljs-comment">// 检查其键是否的 privateRWsetsInBlock 中出现，</span>
+	<span class="hljs-comment">// 否则说明隐私数据不在当前区块范围内，剔除掉，</span>
+	<span class="hljs-comment">// 使得 ownedRWsets 只保留当前区块交易范围内的读写集</span>
+	<span class="hljs-keyword">for</span> k := <span class="hljs-keyword">range</span> ownedRWsets {
+		<span class="hljs-keyword">if</span> _, exists := privateRWsetsInBlock[k]; !exists {
+			...
+			<span class="hljs-built_in">delete</span>(ownedRWsets, k)
+		}
+	}
+	
+	<span class="hljs-comment">// 将隐私数据信息对象的 missingKeysByTxIDs 属性转换到 missingKeys 属性上</span>
+	<span class="hljs-comment">// missingKeys 为 rwsetKeys 类型（type rwsetKeys map[rwSetKey]struct{}）</span>
+	privateInfo.missingKeys = privateInfo.missingKeysByTxIDs.flatten()
+	
+	<span class="hljs-comment">// Remove all keys we already own</span>
+	<span class="hljs-comment">// 剔除已有读写集的键，</span>
+	<span class="hljs-comment">// 最终得到当前节点缺失的隐私数据键列表 privateInfo.missingKeys，</span>
+	<span class="hljs-comment">// 随 privateInfo 对象返回给调用者（coordinator.StoreBlock 方法）</span>
+	privateInfo.missingKeys.exclude(<span class="hljs-function"><span class="hljs-keyword">func</span><span class="hljs-params">(key rwSetKey)</span> <span class="hljs-title">bool</span></span> {
+		_, exists := ownedRWsets[key]
+		<span class="hljs-keyword">return</span> exists
+	})
+	
+	<span class="hljs-keyword">return</span> privateInfo, <span class="hljs-literal">nil</span>
+
+}
+</div></code></pre>
+<h5 id="biinspecttransaction-%e6%96%b9%e6%b3%95%e6%ba%90%e7%a0%81"><code>bi.inspectTransaction</code> 方法源码</h5>
+<pre><code class="language-go"><div><span class="hljs-comment">// 计算出缺失的隐私数据键列表及背书节点列表，保存在 bi 中</span>
+<span class="hljs-function"><span class="hljs-keyword">func</span> <span class="hljs-params">(bi *transactionInspector)</span> <span class="hljs-title">inspectTransaction</span><span class="hljs-params">(seqInBlock <span class="hljs-keyword">uint64</span>, chdr *common.ChannelHeader, txRWSet *rwsetutil.TxRwSet, endorsers []*peer.Endorsement)</span></span> {
+	<span class="hljs-comment">// 遍历每个交易</span>
+	<span class="hljs-keyword">for</span> _, ns := <span class="hljs-keyword">range</span> txRWSet.NsRwSets {
+        <span class="hljs-comment">// 遍历交易中的每个读写集（一个交易可）</span>
+		<span class="hljs-keyword">for</span> _, hashedCollection := <span class="hljs-keyword">range</span> ns.CollHashedRwSets {
+			<span class="hljs-keyword">if</span> !containsWrites(chdr.TxId, ns.NameSpace, hashedCollection) {
+				<span class="hljs-keyword">continue</span>
+			}
+			<span class="hljs-comment">// 获取隐私数据集合访问策略</span>
+			policy := bi.accessPolicyForCollection(chdr, ns.NameSpace, hashedCollection.CollectionName)
+			<span class="hljs-keyword">if</span> policy == <span class="hljs-literal">nil</span> {
+				<span class="hljs-keyword">continue</span>
+			}
+			<span class="hljs-comment">// 检查当前节点是够具有访问该隐私数据集合的权限</span>
+			<span class="hljs-keyword">if</span> !bi.isEligible(policy, ns.NameSpace, hashedCollection.CollectionName) {
+				<span class="hljs-keyword">continue</span>
+			}
+			<span class="hljs-comment">// 根据该隐私数据集合的信息构造隐私数据键（rwSetKey 类型），</span>
+            <span class="hljs-comment">// 标记到 bi.privateRWsetsInBlock 中</span>
+			key := rwSetKey{
+				txID:       chdr.TxId,
+				seqInBlock: seqInBlock,
+				hash:       hex.EncodeToString(hashedCollection.PvtRwSetHash),
+				namespace:  ns.NameSpace,
+				collection: hashedCollection.CollectionName,
+			}
+			bi.privateRWsetsInBlock[key] = <span class="hljs-keyword">struct</span>{}{}
+			<span class="hljs-comment">// 根据键 key 检查已获取到的隐私数据读写集中是否已经存在当前隐私数据，</span>
+			<span class="hljs-comment">// 如果不存在则将隐私数据键 key 保存到</span>
+            <span class="hljs-comment">// 相应的缺失隐私数据的键列表 missingKeys[txAndSeq] 中，</span>
+			<span class="hljs-comment">// 并将拥有相应隐私数据的背书节点列表保存到 bi.sources[key] 中</span>
+			<span class="hljs-keyword">if</span> _, exists := bi.ownedRWsets[key]; !exists {
+				txAndSeq := txAndSeqInBlock{
+					txID:       chdr.TxId,
+					seqInBlock: seqInBlock,
+				}
+				bi.missingKeys[txAndSeq] = <span class="hljs-built_in">append</span>(bi.missingKeys[txAndSeq], key)
+				bi.sources[key] = endorsersFromOrgs(ns.NameSpace, hashedCollection.CollectionName, endorsers, policy.MemberOrgs())
+			}
+		} <span class="hljs-comment">// for all hashed RW sets</span>
+	} <span class="hljs-comment">// for all RW sets</span>
+}
+</div></code></pre>
+
+    </body>
+    </html>

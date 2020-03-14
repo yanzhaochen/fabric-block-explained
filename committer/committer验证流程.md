@@ -22,7 +22,7 @@
 
 `transient` 隐私数据库相当于账本中隐私数据的本地“缓存”，`Committer` 节点提交账本之后要对 `transient` 隐私数据库进行更新。隐私数据的交易过程为
 
-![隐私数据库1](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据库1.jpg)
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据库1.jpg" alt="隐私数据库1" style="zoom: 67%;" />
 
 1. 客户端执行链码，发送包含隐私数据的提案请求给 `Endorsor` 节点；
 2. `Endorsor` 节点进行模拟交易，将隐私数据存放到本节点的 `transient` 隐私数据库中；
@@ -37,7 +37,7 @@
 
 `committer` 通过 `state` 模块接收 `DataMsg` 类型消息，验证交易并提交到账本的工作流程如图所示
 
-![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/state模块提交账本流程1.jpg)
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/state模块提交账本流程1.jpg" style="zoom: 50%;" />
 
 *committer 验证交易并提交到账本的工作流程图*
 
@@ -63,7 +63,7 @@
 
 ##### `coordinator.StoreBlock()` 方法的工作流程
 
-![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/StoreBlock1.jpg)
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/StoreBlock1.jpg" style="zoom:50%;" />
 
 *符号说明：蓝色字体表示处理过程，绿色字体表示数据，实心箭头表示数据流向。*
 
@@ -238,7 +238,7 @@ func computeOwnedRWsets(block *common.Block, blockPvtData util.PvtDataCollection
 
 隐私数据集合类型 `PvtDataCollection` 即从 `DataMsg` 解析得到的隐私数据 `p` 的类型，为了深入了解其结构，也为了更直观地展示上述代码三层迭代的关系，例图给出了隐私数据集合的数据结构关系（黑色字体表示数据类型，蓝色字体表示属性名，绿色方框表示数组/切片），可以看到三层数组分别对应三层迭代。
 
-![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg)
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg" style="zoom: 67%;" />
 
 
 
@@ -277,7 +277,7 @@ type CollectionPvtReadWriteSet struct {
 
 ##### 获取当前节点缺失的隐私数据键列表的流程
 
-![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/获取缺失的隐私数据键列表1.jpg)
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/获取缺失的隐私数据键列表1.jpg" style="zoom:50%;" />
 
 *矩形框表示数据，黑色箭头表示生成数据的过程，绿色箭头表示更新数据的过程，蓝色字体表示调用的方法，`transient` 为节点本地的隐私数据库，红色字体标注的 `ownedRWsets` 和 `missingKeys` 分别为流程图重点关注的已在本地的隐私数据（读写集）和本地缺失的隐私数据（键）*
 
