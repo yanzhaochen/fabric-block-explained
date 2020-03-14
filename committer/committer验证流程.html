@@ -57,8 +57,7 @@
 <h3 id="22-coordinatorstoreblock-%e6%96%b9%e6%b3%95">2.2 coordinator.StoreBlock() 方法</h3>
 <p>2.2.1 小节介绍了 <code>coordinator.StoreBlock()</code> 方法的源码，主要聚焦于该方法的工作步骤；随后的几个小节介绍了 <code>coordinator.StoreBlock()</code> 方法调用的其他方法；</p>
 <p>2.2.2 小节介绍了用于获取本地已有的隐私数据的 <code>computeOwnedRWsets()</code> 方法；</p>
-<p>2.2.2 小节介绍了用于计算本地缺失的隐私数据的 <code>listMissingPrivateData()</code> 方法。</p>
-<p>（待补充</p>
+<p>2.2.3 小节介绍了用于计算本地缺失的隐私数据的 <code>listMissingPrivateData()</code> 方法。</p>
 <h4 id="221-coordinatorstoreblock-%e6%96%b9%e6%b3%95">2.2.1 coordinator.StoreBlock() 方法</h4>
 <h5 id="coordinatorstoreblock-%e6%96%b9%e6%b3%95%e7%9a%84%e5%b7%a5%e4%bd%9c%e6%b5%81%e7%a8%8b"><code>coordinator.StoreBlock()</code> 方法的工作流程</h5>
 <img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/StoreBlock1.jpg" style="zoom:50%;" />
@@ -228,7 +227,7 @@
 </div></code></pre>
 <h5 id="%e9%9a%90%e7%a7%81%e6%95%b0%e6%8d%ae%e9%9b%86%e5%90%88%e6%95%b0%e6%8d%ae%e7%bb%93%e6%9e%84%e8%af%b4%e6%98%8e">隐私数据集合数据结构说明</h5>
 <p>隐私数据集合类型 <code>PvtDataCollection</code> 即从 <code>DataMsg</code> 解析得到的隐私数据 <code>p</code> 的类型，为了深入了解其结构，也为了更直观地展示上述代码三层迭代的关系，例图给出了隐私数据集合的数据结构关系（黑色字体表示数据类型，蓝色字体表示属性名，绿色方框表示数组/切片），可以看到三层数组分别对应三层迭代。</p>
-<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg" style="zoom: 33%;" />
+<img src="https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg" style="zoom: 67%;" />
 <pre><code class="language-go"><div><span class="hljs-comment">// 以下代码为隐私数据集合结构定义</span>
 
 <span class="hljs-comment">// gossip/util/privdata.go</span>
