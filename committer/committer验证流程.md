@@ -55,9 +55,7 @@
 
 2.2.2 小节介绍了用于获取本地已有的隐私数据的 `computeOwnedRWsets()` 方法；
 
-2.2.2 小节介绍了用于计算本地缺失的隐私数据的 `listMissingPrivateData()` 方法。
-
-（待补充
+2.2.3 小节介绍了用于计算本地缺失的隐私数据的 `listMissingPrivateData()` 方法。
 
 #### 2.2.1 coordinator.StoreBlock() 方法
 
