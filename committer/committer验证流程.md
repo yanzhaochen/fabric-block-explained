@@ -12,7 +12,7 @@
 
 `state` 模块循环监听 `gossipChan` 通道和 `readyChan` 通道，调用 `queueNewMessage()`，`deliverPayload()` 和 `commitBlock()` 等方法处理、验证并提交账本。
 
-`state` 模块通过 `gossipChan` 通道接收 `DataMsg` 类型消息，是所要验证和提交的数据来源；通过 `readyChan` 通道在模块内部通知已经获取到正在等待的 `DataMsg` 类型消息，需要进行验证和提交。
+`state` 模块通过 `gossipChan` 通道接收 `DataMsg` 类型消息，其中包含了区块和隐私数据；通过 `readyChan` 通道在模块内部通知已经获取到正在等待的 `DataMsg` 类型消息，需要进行验证和提交。
 
 **核心方法**：`state` 模块通过 `commitBlock()` 方法调用 `s.ledger.StoreBlock()` 方法（state 模块中封装了 `coordinator` 模块作为 `ledger` 字段），进而调用 `coordinator.StoreBlock()` 方法（验证交易和提交账本的核心方法，也是本文分析重点）。
 
@@ -41,8 +41,8 @@
 
 1. 其他节点发来 `DataMsg` 类型的数据消息，放入 `gossipChan` 通道中；
 2. `state` 模块建立消息监听循环，若扑捉到 `gossipChan` 通道中的消息，则调用 `queueNewMessage()` 方法进行处理；
-3. `queueNewMessage()` 方法先调用 `addPayload()` 方法将负载消息放入本地的缓冲区，并检查区块号是否为 `NEXT`（等待提交的下一个区块），实则将消息发送到 `readyChan` 通道中；
-4. `state` 模块的 `deliverPayload()` 方法捕捉 `readyChan` 通道的消息，从中获取有效消息（`payload`），并解析得到`common.block`类型的区块数据 `rowBlock` 和 `util.PvtDataCollections` 类型的隐私数据 `p`；
+3. `queueNewMessage()` 方法先调用 `addPayload()` 方法将负载消息放入本地的缓冲区，并检查区块号是否为 `NEXT`（等待提交的下一个区块），是则将消息发送到 `readyChan` 通道中（通知 `deliverPayload()` 方法已经获取到正在等待的消息了）；
+4. `state` 模块的 `deliverPayload()` 方法捕捉 `readyChan` 通道的消息，从中获取有效消息（`payload`），并解析得到区块数据 `rowBlock`（`common.block` 类型）和隐私数据 `p` 或称为 `privateDataSets`（`util.PvtDataCollections` 类型）；
 5. `state` 模块调用 `commitBlock(rowBlock, p)` 方法（值得注意的是，区块数据 `rowBlock` 和隐私数据 `p` 都作为参数传入），利用 `coordinator` 模块，验证交易数据并提交到账本。
 
 ![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/state模块提交账本流程1.jpg)
@@ -53,7 +53,7 @@
 
 ### 2.2 coordinator.StoreBlock() 方法
 
-2.2.1 小节介绍了 `coordinator.StoreBlock()` 方法的源码，主要聚焦于该方法的工作步骤；随后的几个小节介绍了了 `coordinator.StoreBlock()` 方法调用的其他方法；
+2.2.1 小节介绍了 `coordinator.StoreBlock()` 方法的源码，主要聚焦于该方法的工作步骤；随后的几个小节介绍了 `coordinator.StoreBlock()` 方法调用的其他方法；
 
 2.2.2 小节介绍了`computeOwnedRWsets()` 方法；
 
@@ -69,21 +69,10 @@
 
 3. 处理隐私数据，包括获取已经随 `DataMsg` 消息发送到本节点的隐私数据集合，计算本地缺失的隐私数据和从远程节点拉取缺失的隐私数据集合；构造要提交到账本的区块与隐私数据对象（`BlockAndPvtData` 结构）：
 
-   - 从隐私数据 `p`中获取已经达到本节点的隐私数据集合：调用 `computeOwnedRWsets()` 方法处理与当前区块数据相关的交易，构造在该节点上已经存在的隐私数据读写集对象 `ownedRWsets`；该对象为 `map[rwSetHey][]byte` 类型，其中值类型为适合做字符处理的 `[]byte` ，用来存放着隐私数据；键类型  `reSetKey` 定义为
-
-        ```go
-             type rwSetKey struct {
-       txID       string   // 交易 ID
-               seqInBlock uint64   // 交易序号
-       namespace  string   // 命名空间（链码名称）
-               collection string   // 隐私数据集合名称
-       hash       string   // 读写集哈希值，可供无法查看隐私数据的节点检验隐私数据的合法性
-             }
-```
-   
-- 计算本地缺失的隐私数据：调用 `coordinator.listMissingPrivateData(block, ownedRWsets)`, 计算出需要提交的但是没有随 `DataMsg` 消息到达本地的隐私数据集合（参数 `ownedRWsets` 为已随  `DataMsg` 消息到达本地的隐私数据集合）；后文将继续分析此方法；
+   - 从隐私数据 `p`中获取已经达到本节点的隐私数据集合：调用 `computeOwnedRWsets()` 方法处理与当前区块数据相关的交易，构造在该节点上已经存在的隐私数据读写集 `ownedRWsets`；
+- 计算本地缺失的隐私数据：调用 `coordinator.listMissingPrivateData(block, ownedRWsets)`, 计算出需要提交的但是没有随 `DataMsg` 消息到达本地的隐私数据读写集（参数 `ownedRWsets` 为已获取到的本地隐私数据读写集）；
    - 从远程节点拉取缺失的隐私数据集合：调用 `fetchFromPeers()` 方法，利用 `Fetcher` 组件从其他 `Peer` 节点请求拉取本节点缺失的隐私数据，并存放于到本地 `transient` 隐私数据库。
-
+   
 4. 调用 `coordinator.CommitWithPvtData()`方法，将区块与隐私数据对象提交到账本；
 
 5. 清理本地的 `transient` 隐私数据库中临时存放的隐私数据。
@@ -94,9 +83,11 @@
 // coordinator.StoreBlock() 方法源码分析
 // 源码位于文件：gossip/privdata/coordinator.go
 // 为了方便阅读，出错处理和日志操作等操作均用省略号代替，部分代码顺序有所调整
+// 本文所有源码均为 release-v1.4 版本
 
 // coordinator.StoreBlock() 方法用于验证数据并提交账本
-// 值得注意的是参数 block 和 privateDataSets 均解析自 DataMsg 的有效消息载荷 payload
+// 值得注意的是参数（区块数据 block 和隐私数据集合 privateDataSets）
+// 均解析自 DataMsg 的有效消息载荷 payload
 func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDataCollections) error {
 	// 检查区块数据与消息头部的合法性
 	if block.Data == nil {...}
@@ -185,4 +176,104 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 #### 2.2.2 computeOwnedRWsets() 方法
 
 `coordinator.StoreBlock()` 方法调用 `computeOwnedRWsets(block, p)` 方法处理与当前区块数据相关的交易，构造在该节点上已经存在的隐私数据读写集对象 `ownedRWsets`.
+
+从隐私数据 `p` 中获取已经达到本节点的隐私数据集合：调用 `computeOwnedRWsets()` 方法处理与当前区块数据相关的交易，构造在该节点上已经存在的隐私数据读写集对象 `ownedRWsets`；该对象为 `map[rwSetHey][]byte` 类型，其中值类型为适合做字符处理的 `[]byte` ，用来存放着隐私数据；键类型  `reSetKey` 为包含隐私数据相关信息的结构体，其定义见下方源码。
+
+##### computeOwnedRWsets()相关源码分析
+
+```go
+// computeOwnedRWsets() 方法相关源码
+// 源码位于文件：gossip/privdata/coordinator.go
+
+// 隐私数据读写集对象 ownedRWsets 的键类型 reSetKey 定义
+type rwSetKey struct {
+    txID       string   // 交易 ID
+    seqInBlock uint64   // 交易序号
+    namespace  string   // 命名空间（链码名称）
+    collection string   // 隐私数据集合名称
+    hash       string   // 读写集哈希值，可供无法查看隐私数据的节点检验隐私数据的合法性
+}
+
+// computeOwnedRWsets() 方法获取已达到当前节点的且在区块交易序号内的隐私数据读写集
+func computeOwnedRWsets(block *common.Block, blockPvtData util.PvtDataCollections) (rwsetByKeys, error) {
+	// 获取区块内最后一个交易序号（index）
+	lastBlockSeq := len(block.Data.Data) - 1
+
+    // 构造在该节点上已经存在的隐私数据读写集对象 ownedRWsets
+	ownedRWsets := make(map[rwSetKey][]byte)
+    
+    // 循环处理每一个隐私数据，筛选出在区块范围内的隐私数据，并计算哈希值
+	for _, txPvtData := range blockPvtData {
+		if lastBlockSeq < int(txPvtData.SeqInBlock) { 
+			...
+			continue // 隐私数据关联的交易序号超过区块内的最后一个序号则跳过处理
+		}
+		// 从区块获取特定交易的 envelope
+		env, err := utils.GetEnvelopeFromBlock(block.Data.Data[txPvtData.SeqInBlock])
+		...
+		// 从 envelope 获取有效消息 payload
+		payload, err := utils.GetPayload(env)
+		...
+	
+		// 获取应用通道头部 chdr
+		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		...
+		
+		for _, ns := range txPvtData.WriteSet.NsPvtRwset {
+			for _, col := range ns.CollectionPvtRwset {
+				// 计算隐私数据读写集的哈希值
+				computedHash := hex.EncodeToString(util2.ComputeSHA256(col.Rwset))
+				// 将隐私数据和相关信息写入要返回的隐私数据读写集字典
+				ownedRWsets[rwSetKey{
+					txID:       chdr.TxId,
+					seqInBlock: txPvtData.SeqInBlock,
+					collection: col.CollectionName,
+					namespace:  ns.Namespace,
+					hash:       computedHash,
+				}] = col.Rwset
+			} // 命名空间内迭代隐私数据集合
+		} // 交易范围内迭代命名空间（链码名称）
+	} // 区块范围内迭代交易
+	return ownedRWsets, nil
+}
+```
+
+##### 隐私数据集合数据结构说明
+
+为了更直观地展示上述代码三层迭代的关系，例图给出了隐私数据集合的数据结构关系（黑色字体表示数据类型，蓝色字体表示属性名，绿色方框表示数组/切片），可以看到三层数组分别对应三层迭代。
+
+![](https://picgo-yanzhao.oss-cn-shenzhen.aliyuncs.com/fabric/隐私数据集合数据结构.jpg)
+
+
+
+```go
+// 以下代码为隐私数据集合结构定义
+
+// gossip/util/privdata.go
+type PvtDataCollections []*ledger.TxPvtData
+
+// core/ledger/ledger_interface.go
+type TxPvtData struct {
+	SeqInBlock uint64
+	WriteSet   *rwset.TxPvtReadWriteSet
+}
+
+// protos/ledger/rwset/rwset.pb.go
+type TxPvtReadWriteSet struct {
+	DataModel  TxReadWriteSet_DataModel `protobuf:"varint,1,opt,name=data_model,json=dataModel,enum=rwset.TxReadWriteSet_DataModel" json:"data_model,omitempty"`
+	NsPvtRwset []*NsPvtReadWriteSet     `protobuf:"bytes,2,rep,name=ns_pvt_rwset,json=nsPvtRwset" json:"ns_pvt_rwset,omitempty"`
+}
+
+type NsPvtReadWriteSet struct {
+	Namespace          string                       `protobuf:"bytes,1,opt,name=namespace" json:"namespace,omitempty"`
+	CollectionPvtRwset []*CollectionPvtReadWriteSet `protobuf:"bytes,2,rep,name=collection_pvt_rwset,json=collectionPvtRwset" json:"collection_pvt_rwset,omitempty"`
+}
+
+type CollectionPvtReadWriteSet struct {
+
+  CollectionName string `protobuf:"bytes,1,opt,name=collection_name,json=collectionName" json:"collection_name,omitempty"`
+  Rwset     []byte `protobuf:"bytes,2,opt,name=rwset,proto3" json:"rwset,omitempty"`
+
+}
+```
 
