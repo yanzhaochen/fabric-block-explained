@@ -71,15 +71,15 @@ peer.go 中 createChain 函数调用 txvalidator.NewTxValidator(vcs) 函数创�
 
 交易验证器对象（txValidator 类型）
 
--   实现了 Validator 接口的 Validate 方法，验证交易数据合法性
--   封装了 vscc-ValidatorImpl 结构对象（实现了 vsccValidator 接口），验证背书策略有效性
+-   实现了 Validator 接口的 Validate(block *common.Block) 方法，验证区块 block 中所有交易的合法性
+-   封装了 vsccValidatorImpl 结构对象（实现了 vsccValidator 接口），执行 vscc 验证背书策略有效性
 
 Validate 方法启动 goroutine 对本区块 block.Data.Data 的每个交易数据进行验证，执行过程：
 
 1.  循环启动 goroutine 验证每一个交易
 2.  goroutine 调用 validateTx 函数根据 blockValidationRequest 类型的区块验证请求对象验证某个交易，并将结果传入 results 管道
 3.  循环等待管道传递每一个验证结果
-4.  对有效交易调用 txsfltr.SetFlag 方法进行标识
+4.  对有效交易调用 txsfltr.SetFlag 方法设置交易结果验证码
 5.  检查是否允许重复交易，允许则调用 markTXIdDuplicates 方法标记重复交易为合法
 6.  调用 invalidTXsForUpgradeCC 方法标记因链码升级而失效的交易
 7.  调用 utils.InitBlockMetadata 函数为本区块创建区块元数据，将交易验证结果标识列表写入区块元数据
@@ -101,6 +101,8 @@ type blockValidationResult struct {
 }
 
 // Validate 方法
+// Validate 方法执行对区块 block 内所有交易的并行验证,
+// 
 func (v *txValidator) Validate(block *common.Block) error {
 	...
 	// 创建存放交易验证结果标识的列表（长度为该区块中的交易数量）
@@ -113,7 +115,7 @@ func (v *txValidator) Validate(block *common.Block) error {
 	txidArray := make([]string, len(block.Data.Data))
     // 声明一个传输区块验证结果的管道，用于 goroutines 通信
 	results := make(chan *blockValidationResult)
-    // 循环启动 goroutine 验证交易
+    // 循环启动 goroutine 并行验证交易
 	go func() {
 		for tIdx, d := range block.Data.Data {
 			tIdxLcl := tIdx // 交易序号（index）
